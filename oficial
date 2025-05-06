@@ -1,0 +1,127 @@
+'use server';
+/**
+ * @fileOverview Extracts lab results from unstructured text using AI and abbreviates exam names.
+ *
+ * - extractLabResults - A function that handles the lab result extraction process.
+ * - ExtractLabResultsInput - The input type for the extractLabResults function.
+ * - ExtractLabResultsOutput - The return type for the extractLabResults function.
+ */
+
+import { ai } from '@/ai/ai-instance';
+import { z } from 'genkit';
+
+const ExtractLabResultsInputSchema = z.object({
+  text: z.string().describe('The unstructured text containing lab results, potentially mixed with other information.'),
+});
+export type ExtractLabResultsInput = z.infer<typeof ExtractLabResultsInputSchema>;
+
+const ExtractLabResultsOutputSchema = z.object({
+  resultsString: z.string().describe('A string containing the extracted lab results, separated by " | ". Each result is generally formatted as "(abbreviated exam name): (value)". For leucocyte differential counts (e.g., Seg, Eos, Linf, Mono, Baso), if a percentage value is available, it should be included with the "%" symbol (e.g., "Seg: 50.6%"). Generic names (like "Resultado", "Valor") or names that are just numbers are excluded. Returns an empty string if no valid results are found.'),
+});
+export type ExtractLabResultsOutput = z.infer<typeof ExtractLabResultsOutputSchema>;
+
+export async function extractLabResults(input: ExtractLabResultsInput): Promise<ExtractLabResultsOutput> {
+  return extractLabResultsFlow(input);
+}
+
+const prompt = ai.definePrompt({
+  name: 'extractLabResultsPrompt',
+  input: {
+    schema: ExtractLabResultsInputSchema,
+  },
+  output: {
+    schema: ExtractLabResultsOutputSchema,
+  },
+  prompt: `Analyze the following text and extract ONLY the lab examination results.
+Each result MUST consist of an abbreviated, specific, descriptive exam name and its corresponding numerical or qualitative value.
+
+INSTRUÇÕES CRÍTICAS PARA NOMES DE EXAMES E ABREVIATURAS:
+1.  Nomes de exames DEVEM ser descritivos (ex: "Hemoglobina", "Glicose", "TSH", "Vitamina D", "Segmentados", "Eosinófilos").
+2.  NÃO use termos genéricos como "Resultado", "Valor", "Exame", "Item", "Parâmetro", "Total", "Name", "Test" como nomes de exames se um nome mais específico estiver disponível ou puder ser inferido para o valor. Se um valor aparecer após uma dessas palavras genéricas, tente encontrar o nome real do exame nas linhas anteriores ou contexto.
+3.  Nomes de exames NÃO DEVEM ser apenas numéricos (ex: não extraia "22,64" como nome de exame).
+4.  Se um nome de exame estiver ausente, for muito genérico com base nas regras acima, ou verdadeiramente incerto para um determinado valor, NÃO inclua esse resultado específico. Garanta que o nome identifique significativamente o teste.
+5.  ABREVIE OS NOMES DOS EXAMES da seguinte forma:
+    a.  A abreviatura deve ter de 2 a 4 letras.
+    b.  Analise o tamanho da(s) palavra(s) do nome original para definir o tamanho da abreviatura:
+        *   Palavras curtas (ex: Ureia, Creatina, Sódio) podem ter abreviaturas de 2 ou 3 letras (ex: Ur, Crea, Na).
+        *   Palavras médias (ex: Glicose, Leucócitos, Segmentados, Eosinófilos) podem ter abreviaturas de 3 letras (ex: Gli, Leu, Seg, Eos).
+        *   Palavras longas (ex: Hemoglobina, Fibrinogênio, Dehidroepiandrosterona) podem ter abreviaturas de 2 a 4 letras, priorizando as mais curtas e comuns se existirem (ex: Hb para Hemoglobina, Fib para Fibrinogênio, DHEA para Dehidroepiandrosterona).
+    c.  Para nomes compostos, abrevie cada palavra principal. Artigos e preposições pequenas (de, da, do, e, a, o) podem ser omitidos na abreviação. (Ex: "Bilirrubina Direta" -> "Bil Dir", "Contagem de Plaquetas" -> "Ct Plaq" ou "Plaq", "Volume Corpuscular Médio" -> "VCM").
+    d.  Se o nome do exame já for um símbolo químico, sigla ou abreviatura comumente conhecida (ex: Na, K, Cl, HCO3, TSH, HDL, LDL, TGO, TGP, VCM, HCM, RDW, PCR, CK, AST, ALT, GGT), MANTENHA-O COMO ESTÁ, sem abreviar mais.
+    e.  Exemplos de abreviações desejadas:
+        *   Hemoglobina -> Hb
+        *   Leucócitos -> Leu (referindo-se ao total de leucócitos. Para as células específicas da contagem diferencial, use abreviações como Seg, Linf, Eos, Mono, Baso)
+        *   Segmentados (ou Neutrófilos Segmentados) -> Seg
+        *   Linfócitos -> Linf
+        *   Eosinófilos -> Eos
+        *   Monócitos -> Mono
+        *   Basófilos -> Baso
+        *   Eritrócitos -> Eri ou Hema
+        *   Hematócrito -> Ht ou Hct
+        *   Plaquetas ou Contagem de Plaquetas -> Plaq
+        *   Glicose -> Gli
+        *   Colesterol Total -> Col Tot
+        *   Triglicerídeos -> Trig
+        *   Ureia -> Ur
+        *   Creatinina -> Crea
+        *   Ácido Úrico -> Ac Uri
+        *   Bilirrubina Total -> Bil Tot
+        *   Bilirrubina Direta -> Bil Dir
+        *   Bilirrubina Indireta -> Bil Ind
+        *   Proteínas Totais -> Prot Tot
+        *   Albumina -> Alb
+        *   Globulina -> Glob
+        *   Fosfatase Alcalina -> FA ou Fosf Alc
+        *   Gama GT (GGT) -> GGT (manter)
+        *   Transaminase Glutâmico Oxalacética (TGO/AST) -> TGO ou AST (manter se presente como sigla)
+        *   Transaminase Glutâmico Pirúvica (TGP/ALT) -> TGP ou ALT (manter se presente como sigla)
+        *   Sódio -> Na (manter)
+        *   Potássio -> K (manter)
+        *   Cloro ou Cloretos -> Cl (manter)
+        *   Cálcio -> Ca
+        *   Magnésio -> Mg
+        *   Fósforo -> P ou Fosf
+        *   TSH (Hormônio Tireoestimulante) -> TSH (manter)
+        *   T4 Livre -> T4L
+        *   Vitamina D (25-hidroxivitamina D) -> Vit D
+        *   Ferro Sérico -> Fe Ser
+        *   Ferritina -> Ferr
+        *   Velocidade de Hemossedimentação -> VHS
+
+FORMATTING INSTRUCTIONS:
+1.  The general output format for each result MUST be "(abbreviated exam name): (value)".
+2.  **EXCEPTION FOR LEUCOCYTE DIFFERENTIALS:** For leucocyte differential counts (e.g., Segmentados/Neutrófilos, Eosinófilos, Linfócitos, Monócitos, Basófilos), if a percentage value (e.g., "50,6 %", "3.6%") is present in the input text for that specific component, you MUST include the percentage value WITH the "%" symbol in the output.
+    *   Example: "Seg: 50.6% | Eos: 3.6% | Linf: 30.0%"
+    *   The abbreviation rules still apply (e.g., Segmentados -> Seg, Eosinófilos -> Eos, Linfócitos -> Linf, Monócitos -> Mono, Basófilos -> Baso).
+3.  For ALL OTHER EXAMS (not part of leucocyte differential percentages), do NOT include the unit of measure.
+4.  Format the final output as a single string where multiple valid results are separated by " | ".
+    Example of a correctly formatted string including a leucocyte differential: "Hb: 14.5 | Seg: 60.0% | Gli: 95 | TSH: 2.1"
+5.  If no valid lab results meeting all criteria are found, return an empty string.
+
+CONTEXTUAL INSTRUCTIONS:
+- Ignore reference values, dates, patient information, doctor's notes, addresses, phone numbers, units of measure (like mg/dL, U/L, pg/mL, UI/L, /mm³, mil/uL) for non-leucocyte differential results, and any other administrative or non-result text. Focus solely on abbreviated exam name-value pairs, with the specific exception for leucocyte differential percentages.
+- Be careful not to extract numbers from reference ranges or other non-result contexts as values.
+
+Text to analyze:
+\`\`\`
+{{{text}}}
+\`\`\`
+`,
+});
+
+const extractLabResultsFlow = ai.defineFlow(
+  {
+    name: 'extractLabResultsFlow',
+    inputSchema: ExtractLabResultsInputSchema,
+    outputSchema: ExtractLabResultsOutputSchema,
+  },
+  async (input) => {
+    const { output } = await prompt(input);
+    // Ensure output is not null and resultsString is a string, defaulting to empty string
+    // Also, if the AI returns a string that is just whitespace, treat it as empty.
+    if (output && output.resultsString && output.resultsString.trim() !== '') {
+        return output;
+    }
+    return { resultsString: '' };
+  }
+);
